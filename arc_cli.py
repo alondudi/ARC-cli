@@ -7,6 +7,7 @@ def arc():
     """ARC - Amazon Resources Controller CLI"""
     pass
 
+
 ###########AWS-SETUP#############
 @arc.command()
 def setup():
