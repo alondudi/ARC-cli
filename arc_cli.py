@@ -60,6 +60,7 @@ def list_s3():
     if not buckets:
         click.echo("No ARC buckets found.")
         return
+    click.secho("-----ARC-buckets-----", fg="bright_blue")
     for bucket in buckets:
         click.echo(f" • {bucket} [Managed by ARC]")
 
@@ -119,3 +120,31 @@ def delete_s3(name):
         click.secho(f"{message}", fg='green', bold=True)
     else:
         click.secho(f"Error: {message}", fg='red')
+
+
+@arc.group()
+def upload():
+    """Upload resources to AWS"""
+    pass
+
+
+@upload.command(name="s3")
+@click.argument('file_path', type=click.Path(exists=True))  # בודק שהקובץ קיים פיזית
+@click.argument('bucket_name')
+def upload_s3(file_path, bucket_name):
+    """Upload files to an ARC-managed S3 bucket"""
+    click.echo(f"Uploading '{file_path}' to '{bucket_name}'...")
+    manager = AWSClient()
+    success, message = manager.upload_to_s3(file_path, bucket_name)
+
+    if success:
+        click.secho(f"{message}", fg='green', bold=True)
+        url = f"https://{bucket_name}.s3.{manager.region}.amazonaws.com/{import_os_basename(file_path)}"
+        click.echo(f"Public Link (if public): {url}")
+    else:
+        click.secho(f"Error: {message}", fg='red')
+
+
+def import_os_basename(path):
+    import os
+    return os.path.basename(path)

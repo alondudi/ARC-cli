@@ -83,8 +83,6 @@ class AWSClient:
                 return False, f"Quota exceeded: You already have 2 ARC buckets: {', '.join(arc_buckets)}. Limit is 2."
             identity = self.sts.get_caller_identity()
             user_name = identity.get('Arn', '').split('/')[-1]
-
-            # 2. יצירה בסיסית (בלי ACL בכלל!)
             if self.region == 'us-east-1':
                 self.s3.create_bucket(Bucket=bucket_name)
             else:
@@ -92,8 +90,6 @@ class AWSClient:
                     Bucket=bucket_name,
                     CreateBucketConfiguration={'LocationConstraint': self.region}
                 )
-
-            # 3. אם ביקשו ציבורי - משתמשים ב-Policy במקום ב-ACL
             if is_public:
                 # א. פתיחת החסימה הציבורית
                 self.s3.put_public_access_block(
@@ -103,8 +99,6 @@ class AWSClient:
                         'BlockPublicPolicy': False, 'RestrictPublicBuckets': False
                     }
                 )
-
-                # ב. הוספת Policy שמאפשר לכולם לקרוא (Read-Only)
                 bucket_policy = {
                     "Version": "2012-10-17",
                     "Statement": [{
@@ -137,6 +131,19 @@ class AWSClient:
             # הערה: S3 מאפשר למחוק באקט רק אם הוא ריק מקבצים
             self.s3.delete_bucket(Bucket=bucket_name)
             return True, f"Bucket '{bucket_name}' deleted successfully."
+        except Exception as e:
+            return False, str(e)
 
+    def upload_to_s3(self, file_path, bucket_name):
+        """Upload files only if the bucket is managed by ARC."""
+        try:
+            arc_buckets = self.get_arc_buckets()
+            if bucket_name not in arc_buckets:
+                return False, f"Access Denied: Bucket '{bucket_name}' is not an ARC bucket."
+
+            import os
+            file_name = os.path.basename(file_path)
+            self.s3.upload_file(file_path, bucket_name, file_name)
+            return True, f"File '{file_name}' uploaded successfully to '{bucket_name}'."
         except Exception as e:
             return False, str(e)
