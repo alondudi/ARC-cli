@@ -24,6 +24,8 @@ class AWSClient:
             )
             self.sts = self.session.client('sts')
             self.s3 = self.session.client('s3')
+            self.ec2 = self.session.client('ec2')
+
         except Exception as e:
             print(f"Connection Error: {e}")
 
@@ -53,6 +55,7 @@ class AWSClient:
         except Exception as e:
             return False, str(e)
 
+############GET##############
     def get_arc_buckets(self):
         """Returns only buckets that were created by ARC (based on tags)."""
         arc_buckets = []
@@ -72,6 +75,34 @@ class AWSClient:
             return arc_buckets
         except Exception as e:
             print(f"Error filtering buckets: {e}")
+            return []
+
+    def get_arc_instances(self):
+        try:
+            filters = [
+                {'Name': 'tag:Tool', 'Values': ['ARC']},
+                {'Name': 'instance-state-name',
+                 'Values': ['pending', 'running', 'shutting-down', 'stopping', 'stopped']}
+            ]
+
+            response = self.ec2.describe_instances(Filters=filters)
+            instances_list = []
+
+            for reservation in response.get('Reservations', []):
+                for ins in reservation.get('Instances', []):
+                    name = next((tag['Value'] for tag in ins.get('Tags', []) if tag['Key'] == 'Name'), "Unnamed")
+
+                    instances_list.append({
+                        'id': ins['InstanceId'],
+                        'status': ins['State']['Name'],
+                        'name': name,
+                        'type': ins['InstanceType'],
+                        'public_ip': ins.get('PublicIpAddress', 'N/A'),
+                        'private_ip': ins.get('PrivateIpAddress', 'N/A')
+                    })
+            return instances_list
+        except Exception as e:
+            print(f"Error fetching ARC instances: {e}")
             return []
 
     import json
@@ -120,14 +151,54 @@ class AWSClient:
         except Exception as e:
             return False, str(e)
 
+    def create_instance(self, instance_name, os_type, instance_type, user_data=None):
+        try:
+            # בדיקת מכסה: סופרים רק אינסטנסים של ARC שהם בסטטוס running
+            all_arc_instances = self.get_arc_instances()
+            running_instances = [i for i in all_arc_instances if i['status'] == 'running']
+
+            if len(running_instances) >= 2:
+                instance_ids = ", ".join([i['id'] for i in running_instances])
+                return False, f"Quota exceeded: 2 ARC instances are already running ({instance_ids})."
+
+            ami_map = {
+                'AL2023': 'ami-0532be01f26a3de55',
+                'UBUNTU': 'ami-0b6c6ebed2801a5cb'
+            }
+
+            selected_ami = ami_map.get(os_type.upper())
+
+            launch_params = {
+                'ImageId': selected_ami,
+                'InstanceType': instance_type.lower(),  # t3.micro או t3.small
+                'MinCount': 1,
+                'MaxCount': 1,
+                'TagSpecifications': [{
+                    'ResourceType': 'instance',
+                    'Tags': [
+                        {'Key': 'Name', 'Value': instance_name},
+                        {'Key': 'Tool', 'Value': 'ARC'}
+                    ]
+                }]
+            }
+
+            if user_data:
+                launch_params['UserData'] = user_data
+
+            response = self.ec2.run_instances(**launch_params)
+            new_id = response['Instances'][0]['InstanceId']
+
+            return True, f"Launched {os_type} ({instance_type}) instance {new_id}. Running: {len(running_instances) + 1}/2"
+
+        except Exception as e:
+            return False, str(e)
+
     def delete_bucket(self, bucket_name):
         try:
-            # שלב א': בדיקה שהבאקט שייך ל-ARC
             arc_buckets = self.get_arc_buckets()
             if bucket_name not in arc_buckets:
                 return False, f"Permission Denied: Bucket '{bucket_name}' is not managed by ARC."
 
-            # שלב ב': מחיקת הבאקט
             # הערה: S3 מאפשר למחוק באקט רק אם הוא ריק מקבצים
             self.s3.delete_bucket(Bucket=bucket_name)
             return True, f"Bucket '{bucket_name}' deleted successfully."

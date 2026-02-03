@@ -58,19 +58,38 @@ def list_s3():
     manager = AWSClient()
     buckets = manager.get_arc_buckets()
     if not buckets:
-        click.echo("No ARC buckets found.")
+        click.secho("No ARC buckets found.", fg="bright_yellow")
         return
-    click.secho("-----ARC-buckets-----", fg="bright_blue")
+    click.secho("     -----ARC-buckets-----", fg="bright_blue")
     for bucket in buckets:
         click.echo(f" • {bucket} [Managed by ARC]")
 
 
 @list.command(name="ec2")
 def list_ec2():
-    """List all EC2 instances"""
-    click.echo("Fetching EC2 instances...")
-    click.echo("Feature coming soon!")
+    """List ARC instances with IP addresses"""
+    click.echo("Fetching ARC-managed instances... 🔍")
+    manager = AWSClient()
+    instances = manager.get_arc_instances()
 
+    if not instances:
+        click.echo("No ARC-managed instances found.")
+        return
+
+    # כותרת טבלה
+    click.secho("                          -----ARC-instances-----", fg="bright_blue")
+    header = f"{'NAME':<15} | {'STATUS':<10} | {'PUBLIC IP':<15} | {'PRIVATE IP':<15} | {'ID':<20}"
+    click.secho(header, bold=True, underline=True)
+    for ins in instances:
+        # צביעת סטטוס
+        status_color = 'green' if ins['status'] == 'running' else 'yellow' if ins['status'] == 'stopped' else 'white'
+        status_text = click.style(ins['status'], fg=status_color)
+
+        # צביעת ה-IP הציבורי (כדי שיבלוט שאפשר להתחבר)
+        public_ip = click.style(ins['public_ip'], fg='cyan') if ins['public_ip'] != 'N/A' else ins['public_ip']
+
+        line = f"{ins['name']:<15} | {status_text:<19} | {public_ip:<24} | {ins['private_ip']:<15} | {ins['id']:<20}"
+        click.echo(line)
 #############create###############
 @arc.group()
 def create():
@@ -96,6 +115,51 @@ def create_s3(name, public):
         click.secho(f"{message}", fg='green', bold=True)
     else:
         click.secho(f"Error: {message}", fg='red')
+
+
+@create.command(name="ec2")
+@click.argument('name')
+def create_ec2(name):
+    """Interactive EC2 creation wizard with Quota management"""
+
+    # 1. בחירת מערכת הפעלה
+    os_choice = click.prompt(
+        "Which OS would you like?",
+        type=click.Choice(['AL2023', 'UBUNTU'], case_sensitive=False),
+        default='AL2023'
+    )
+
+    # 2. בחירת גודל שרת (T3 Micro vs T3 Small)
+    size_choice = click.prompt(
+        "Choose instance size",
+        type=click.Choice(['t3.micro', 't3.small'], case_sensitive=False),
+        default='t3.micro'
+    )
+
+    # 3. הוספת User Data
+    user_data = None
+    if click.confirm("Would you like to add a User Data script?"):
+        click.echo("Enter your script (type 'END' on a new line to finish):")
+        lines = []
+        while True:
+            line = input()
+            if line.strip().upper() == 'END':
+                break
+            lines.append(line)
+        user_data = "\n".join(lines)
+
+    # 4. אישור סופי והרצה
+    if not click.confirm(f"Launch {os_choice} ({size_choice}) instance '{name}'?"):
+        click.echo("Aborted.")
+        return
+
+    manager = AWSClient()
+    success, message = manager.create_instance(name, os_choice, size_choice, user_data)
+
+    if success:
+        click.secho(f"✅ {message}", fg='green', bold=True)
+    else:
+        click.secho(f"❌ Error: {message}", fg='red')
 
 
 @arc.group()
