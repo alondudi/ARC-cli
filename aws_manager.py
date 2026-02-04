@@ -5,9 +5,16 @@ from pathlib import Path
 
 
 class AWSClient:
-    CONFIG_PATH = Path.home() / ".arc_config.json"
+    # הגדרת תיקיית הבית והקונפיגורציה של ARC
+    ARC_HOME = Path.home() / ".arc"
+    KEYS_DIR = ARC_HOME / "keys"
+    CONFIG_PATH = KEYS_DIR / "config.json"
 
     def __init__(self, access_key=None, secret_key=None, region=None):
+        # יצירת התיקיות פיזית על המחשב אם הן לא קיימות
+        self.ARC_HOME.mkdir(exist_ok=True)
+        self.KEYS_DIR.mkdir(exist_ok=True)
+
         if not access_key:
             config = self._load_config()
             access_key = config.get("access_key")
@@ -30,7 +37,7 @@ class AWSClient:
             print(f"Connection Error: {e}")
 
     def _load_config(self):
-        """Reading the config file from disk."""
+        """טעינת הגדרות מהקובץ בתיקיית .arc"""
         if self.CONFIG_PATH.exists():
             try:
                 return json.loads(self.CONFIG_PATH.read_text())
@@ -39,7 +46,7 @@ class AWSClient:
         return {}
 
     def save_config(self, access_key, secret_key, region):
-        """Saving the credentials to a JSON file."""
+        """שמירת הגדרות לקובץ בתוך תיקיית .arc"""
         data = {
             "access_key": access_key,
             "secret_key": secret_key,
@@ -48,20 +55,39 @@ class AWSClient:
         self.CONFIG_PATH.write_text(json.dumps(data, indent=4))
 
     def validate_connection(self):
-        """Testing the connection with STS."""
         try:
             identity = self.sts.get_caller_identity()
             return True, identity.get('Arn')
         except Exception as e:
             return False, str(e)
 
-############GET##############
+    # ---------- ניהול מפתחות (Keys) ----------
+
+    def get_all_aws_keys(self):
+        """שליפת שמות המפתחות שקיימים בחשבון ה-AWS"""
+        try:
+            response = self.ec2.describe_key_pairs()
+            return [k['KeyName'] for k in response.get('KeyPairs', [])]
+        except Exception:
+            return []
+
+    def get_available_local_keys(self):
+        """הצלבה בין מפתחות בענן לקבצים פיזיים בתיקיית .arc/keys"""
+        aws_keys = self.get_all_aws_keys()
+        local_files = os.listdir(self.KEYS_DIR)
+
+        valid_keys = []
+        for key in aws_keys:
+            if f"{key}.pem" in local_files or f"{key}.ppk" in local_files:
+                valid_keys.append(key)
+        return valid_keys
+
+    # ---------- שליפת משאבים (GET) ----------
+
     def get_arc_buckets(self):
-        """Returns only buckets that were created by ARC (based on tags)."""
         arc_buckets = []
         try:
             all_buckets = self.s3.list_buckets().get('Buckets', [])
-
             for bucket in all_buckets:
                 name = bucket['Name']
                 try:
@@ -71,10 +97,8 @@ class AWSClient:
                         arc_buckets.append(name)
                 except:
                     continue
-
             return arc_buckets
-        except Exception as e:
-            print(f"Error filtering buckets: {e}")
+        except Exception:
             return []
 
     def get_arc_instances(self):
@@ -84,14 +108,11 @@ class AWSClient:
                 {'Name': 'instance-state-name',
                  'Values': ['pending', 'running', 'shutting-down', 'stopping', 'stopped']}
             ]
-
             response = self.ec2.describe_instances(Filters=filters)
             instances_list = []
-
             for reservation in response.get('Reservations', []):
                 for ins in reservation.get('Instances', []):
                     name = next((tag['Value'] for tag in ins.get('Tags', []) if tag['Key'] == 'Name'), "Unnamed")
-
                     instances_list.append({
                         'id': ins['InstanceId'],
                         'status': ins['State']['Name'],
@@ -101,120 +122,105 @@ class AWSClient:
                         'private_ip': ins.get('PrivateIpAddress', 'N/A')
                     })
             return instances_list
-        except Exception as e:
-            print(f"Error fetching ARC instances: {e}")
+        except Exception:
             return []
 
-    import json
+    # ---------- יצירת משאבים (CREATE) ----------
 
     def create_bucket(self, bucket_name, is_public=False):
         try:
-            arc_buckets = self.get_arc_buckets()
-            if len(arc_buckets) >= 2:
-                return False, f"Quota exceeded: You already have 2 ARC buckets: {', '.join(arc_buckets)}. Limit is 2."
-            identity = self.sts.get_caller_identity()
-            user_name = identity.get('Arn', '').split('/')[-1]
+            if len(self.get_arc_buckets()) >= 2:
+                return False, "Quota exceeded: You already have 2 ARC buckets."
+
             if self.region == 'us-east-1':
                 self.s3.create_bucket(Bucket=bucket_name)
             else:
-                self.s3.create_bucket(
-                    Bucket=bucket_name,
-                    CreateBucketConfiguration={'LocationConstraint': self.region}
-                )
-            if is_public:
-                # א. פתיחת החסימה הציבורית
-                self.s3.put_public_access_block(
-                    Bucket=bucket_name,
-                    PublicAccessBlockConfiguration={
-                        'BlockPublicAcls': False, 'IgnorePublicAcls': False,
-                        'BlockPublicPolicy': False, 'RestrictPublicBuckets': False
-                    }
-                )
-                bucket_policy = {
-                    "Version": "2012-10-17",
-                    "Statement": [{
-                        "Sid": "PublicReadGetObject",
-                        "Effect": "Allow",
-                        "Principal": "*",
-                        "Action": "s3:GetObject",
-                        "Resource": f"arn:aws:s3:::{bucket_name}/*"
-                    }]
-                }
-                self.s3.put_bucket_policy(Bucket=bucket_name, Policy=json.dumps(bucket_policy))
+                self.s3.create_bucket(Bucket=bucket_name, CreateBucketConfiguration={'LocationConstraint': self.region})
 
-            # 4. הוספת תגים
+            if is_public:
+                self.s3.put_public_access_block(Bucket=bucket_name,
+                                                PublicAccessBlockConfiguration={'BlockPublicAcls': False,
+                                                                                'IgnorePublicAcls': False,
+                                                                                'BlockPublicPolicy': False,
+                                                                                'RestrictPublicBuckets': False})
+                policy = {"Version": "2012-10-17", "Statement": [
+                    {"Effect": "Allow", "Principal": "*", "Action": "s3:GetObject",
+                     "Resource": f"arn:aws:s3:::{bucket_name}/*"}]}
+                self.s3.put_bucket_policy(Bucket=bucket_name, Policy=json.dumps(policy))
+
+            identity = self.sts.get_caller_identity()
+            user_name = identity.get('Arn', '').split('/')[-1]
             tags = {'TagSet': [{'Key': 'CreatedBy', 'Value': user_name}, {'Key': 'Tool', 'Value': 'ARC'}]}
             self.s3.put_bucket_tagging(Bucket=bucket_name, Tagging=tags)
-
-            return True, f"Bucket created successfully (Public: {is_public})"
-
+            return True, f"Bucket '{bucket_name}' created successfully."
         except Exception as e:
             return False, str(e)
 
-    def create_instance(self, instance_name, os_type, instance_type, user_data=None):
+    def create_instance(self, instance_name, os_type, instance_type, key_name, user_data=None):
         try:
-            # בדיקת מכסה: סופרים רק אינסטנסים של ARC שהם בסטטוס running
-            all_arc_instances = self.get_arc_instances()
-            running_instances = [i for i in all_arc_instances if i['status'] == 'running']
-
-            if len(running_instances) >= 2:
-                instance_ids = ", ".join([i['id'] for i in running_instances])
-                return False, f"Quota exceeded: 2 ARC instances are already running ({instance_ids})."
+            running = [i for i in self.get_arc_instances() if i['status'] == 'running']
+            if len(running) >= 2:
+                return False, "Quota exceeded: 2 ARC instances are already running."
 
             ami_map = {
                 'AL2023': 'ami-0532be01f26a3de55',
                 'UBUNTU': 'ami-0b6c6ebed2801a5cb'
             }
 
-            selected_ami = ami_map.get(os_type.upper())
-
             launch_params = {
-                'ImageId': selected_ami,
-                'InstanceType': instance_type.lower(),  # t3.micro או t3.small
+                'ImageId': ami_map.get(os_type.upper()),
+                'InstanceType': instance_type.lower(),
+                'KeyName': key_name,
                 'MinCount': 1,
                 'MaxCount': 1,
                 'TagSpecifications': [{
                     'ResourceType': 'instance',
-                    'Tags': [
-                        {'Key': 'Name', 'Value': instance_name},
-                        {'Key': 'Tool', 'Value': 'ARC'}
-                    ]
+                    'Tags': [{'Key': 'Name', 'Value': instance_name}, {'Key': 'Tool', 'Value': 'ARC'}]
                 }]
             }
-
             if user_data:
                 launch_params['UserData'] = user_data
 
             response = self.ec2.run_instances(**launch_params)
             new_id = response['Instances'][0]['InstanceId']
-
-            return True, f"Launched {os_type} ({instance_type}) instance {new_id}. Running: {len(running_instances) + 1}/2"
-
+            return True, f"Launched {instance_name} ({instance_type}) with key '{key_name}'. ID: {new_id}"
         except Exception as e:
             return False, str(e)
 
+    # ---------- פעולות (DELETE / UPLOAD) ----------
+
     def delete_bucket(self, bucket_name):
         try:
-            arc_buckets = self.get_arc_buckets()
-            if bucket_name not in arc_buckets:
-                return False, f"Permission Denied: Bucket '{bucket_name}' is not managed by ARC."
-
-            # הערה: S3 מאפשר למחוק באקט רק אם הוא ריק מקבצים
+            if bucket_name not in self.get_arc_buckets():
+                return False, "Permission Denied: Not an ARC bucket."
             self.s3.delete_bucket(Bucket=bucket_name)
-            return True, f"Bucket '{bucket_name}' deleted successfully."
+            return True, f"Bucket '{bucket_name}' deleted."
+        except Exception as e:
+            return False, str(e)
+
+    def terminate_instance(self, name_or_id):
+        try:
+            instance_id = name_or_id
+            # אם המשתמש הזין שם ולא ID (שלא מתחיל ב-i-)
+            if not name_or_id.startswith('i-'):
+                instances = self.get_arc_instances()
+                target = next((i for i in instances if i['name'] == name_or_id), None)
+                if not target:
+                    return False, f"Instance with name '{name_or_id}' not found in ARC."
+                instance_id = target['id']
+
+            # ביצוע המחיקה
+            self.ec2.terminate_instances(InstanceIds=[instance_id])
+            return True, f"Termination request for {instance_id} sent successfully."
         except Exception as e:
             return False, str(e)
 
     def upload_to_s3(self, file_path, bucket_name):
-        """Upload files only if the bucket is managed by ARC."""
         try:
-            arc_buckets = self.get_arc_buckets()
-            if bucket_name not in arc_buckets:
-                return False, f"Access Denied: Bucket '{bucket_name}' is not an ARC bucket."
-
-            import os
+            if bucket_name not in self.get_arc_buckets():
+                return False, "Access Denied: Not an ARC bucket."
             file_name = os.path.basename(file_path)
             self.s3.upload_file(file_path, bucket_name, file_name)
-            return True, f"File '{file_name}' uploaded successfully to '{bucket_name}'."
+            return True, f"File '{file_name}' uploaded successfully."
         except Exception as e:
             return False, str(e)
