@@ -19,6 +19,7 @@ def arc():
 
 @arc.command()
 def easter():
+    """EGG"""
     click.secho(ARC_LOGO, fg='cyan')
 
 
@@ -231,9 +232,42 @@ def delete_ec2(name_or_id):
         click.secho(f" Error: {message}", fg='red')
 
 
+@arc.group(name="stop")
+def stop_group():
+    """Stop ARC resources (ec2, etc.)"""
+    pass
+
+
+@stop_group.command(name="ec2")
+@click.argument('name')
+def stop_ec2(name):
+    """Stop a running ARC instance"""
+    manager = AWSClient()
+    click.echo(f"Stopping instance '{name}'...")
+    success, message = manager.manage_instance(name, 'stop')
+    click.secho(message, fg='green' if success else 'red')
+
+
+# --- פקודת START ---
+@arc.group(name="start")
+def start_group():
+    """Start ARC resources (ec2, etc.)"""
+    pass
+
+
+@start_group.command(name="ec2")
+@click.argument('name')
+def start_ec2(name):
+    """Start a stopped ARC instance"""
+    manager = AWSClient()
+    click.echo(f"Starting instance '{name}'...")
+    success, message = manager.manage_instance(name, 'start')
+    click.secho(message, fg='green' if success else 'red')
+
+
 @arc.group()
 def upload():
-    """Upload to S3"""
+    """Upload files to S3"""
     pass
 
 

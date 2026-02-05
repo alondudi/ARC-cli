@@ -1,10 +1,47 @@
+# ARC CLI Specific
+.arc/
+# החרגת קבצי מפתחות ספציפיים ליתר ביטחון
+*.pem
+*.ppk
+
 # Python
-.idea/
 __pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
 *.egg-info/
+.installed.cfg
+*.egg
 venv/
 .env
+.venv
+pip-log.txt
+pip-delete-this-directory.txt
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
 
 # AWS
 .aws/
 credentials
+
+# OS files
+.DS_Store
+Thumbs.db

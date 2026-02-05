@@ -201,7 +201,6 @@ class AWSClient:
     def terminate_instance(self, name_or_id):
         try:
             instance_id = name_or_id
-            # אם המשתמש הזין שם ולא ID (שלא מתחיל ב-i-)
             if not name_or_id.startswith('i-'):
                 instances = self.get_arc_instances()
                 target = next((i for i in instances if i['name'] == name_or_id), None)
@@ -211,7 +210,41 @@ class AWSClient:
 
             # ביצוע המחיקה
             self.ec2.terminate_instances(InstanceIds=[instance_id])
-            return True, f"Termination request for {instance_id} sent successfully."
+            return True, f"Termination request for {name_or_id} sent successfully."
+        except Exception as e:
+            return False, str(e)
+
+    def manage_instance(self, name_or_id, action):
+        """
+        ניהול חכם של מצב השרת (start, stop ).
+        בודק את המצב הנוכחי כדי למנוע פעולות כפולות.
+        """
+        try:
+            instances = self.get_arc_instances()
+            target = next((i for i in instances if i['name'] == name_or_id or i['id'] == name_or_id), None)
+
+            if not target:
+                return False, f"Instance '{name_or_id}' not found in ARC."
+
+            instance_id = target['id']
+            current_status = target['status']
+
+            if action == 'stop' and current_status == 'stopped':
+                return False, f"Instance '{name_or_id}' is already stopped. No action taken."
+
+            if action == 'start' and current_status == 'running':
+                return False, f"Instance '{name_or_id}' is already running. No action taken."
+
+            # 3. מיפוי הפקודות של Boto3
+            actions = {
+                'start': self.ec2.start_instances,
+                'stop': self.ec2.stop_instances,
+            }
+
+            # 4. ביצוע הפעולה
+            actions[action](InstanceIds=[instance_id])
+            return True, f"{action.capitalize()} request sent for {name_or_id}."
+
         except Exception as e:
             return False, str(e)
 
