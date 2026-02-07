@@ -14,6 +14,7 @@ setup(
         'Click>=8.0',
         'boto3>=1.26.0',
         'colorama',
+        'rich',
     ],
 
     entry_points={

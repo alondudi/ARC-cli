@@ -1,6 +1,14 @@
 import click
 from aws_manager import AWSClient
+from rich.console import Console
+import sys
+import os
 
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding='utf-8')
+    os.system('color')
+
+console = Console()
 ARC_LOGO = r"""
     _     ____    ____ 
    / \   |  _ \  / ___|
@@ -72,9 +80,9 @@ def list():
 
 @list.command(name="s3")
 def list_s3():
-    click.echo("Fetching ARC-managed buckets...")
-    manager = AWSClient()
-    buckets = manager.get_arc_buckets()
+    with console.status("Fetching ARC-managed buckets...", spinner="line"):
+        manager = AWSClient()
+        buckets = manager.get_arc_buckets()
     if not buckets:
         click.secho("No ARC buckets found.", fg="yellow")
         return
@@ -86,9 +94,9 @@ def list_s3():
 @list.command(name="ec2")
 def list_ec2():
     """List ARC instances with perfectly aligned columns"""
-    click.echo("Fetching ARC-managed instances... ")
-    manager = AWSClient()
-    instances = manager.get_arc_instances()
+    with console.status("Fetching ARC-managed instances...", spinner="line"):
+        manager = AWSClient()
+        instances = manager.get_arc_instances()
 
     if not instances:
         click.echo("No ARC-managed instances found.")
@@ -128,6 +136,32 @@ def list_ec2():
             line = line.replace(pub_ip, colored_pub_ip, 1)
 
         click.echo(line)
+
+
+@list.command(name="zones")
+def list_zones():
+    """List only ARC-managed Hosted Zones"""
+    with console.status("Fetching ARC-managed DNS zones...", spinner="line"):
+        manager = AWSClient()
+        zones = manager.list_hosted_zones()
+
+    if not zones:
+        click.secho("No ARC-managed hosted zones found.", fg="yellow")
+        return
+
+    # כותרת מעוצבת
+    click.echo("")
+    click.secho(f"{'-----ARC-DNS-Zones-----':^65}", fg="bright_blue", bold=True)
+
+    header = f"{'DOMAIN NAME':<30} | {'ZONE ID':<20} | {'RECORDS':<10}"
+    click.secho(header, bold=True, underline=True)
+
+    for z in zones:
+        name_text = click.style(z['name'], fg='cyan')
+        line = f"{z['name']:<30} | {z['id']:<20} | {z['records']:<10}"
+        line = line.replace(z['name'], name_text, 1)
+        click.echo(line)
+
 
 @arc.group()
 def create():
@@ -186,6 +220,46 @@ def create_ec2(name):
         click.secho(message, fg='green' if success else 'red')
 
 
+@create.command(name="zone")
+@click.argument('domain_name')
+def create_zone(domain_name):
+    """Create a new Public Hosted Zone"""
+    click.echo(f"Creating Hosted Zone for {click.style(domain_name, fg='cyan')}...")
+    manager = AWSClient()
+
+    success, result = manager.create_hosted_zone(domain_name)
+
+    if success:
+        click.secho(f"✅ Successfully created zone: {result['id']}", fg='green', bold=True)
+        click.echo("\nAssign these Name Servers to your domain registrar:")
+        for ns in result['name_servers']:
+            click.secho(f" • {ns}", fg='bright_blue')
+    else:
+        click.secho(f"❌ Error: {result}", fg='red')
+
+
+@create.command(name="record")
+@click.argument('zone_name')
+def create_record(zone_name):
+    """Add a new DNS record (A-Record)"""
+
+    console.print(f"[bold blue]Add Record to:[/bold blue] {zone_name}")
+
+    # שאלות פשוטות
+    name = click.prompt(" Name (e.g. 'www' or '@')", default="www")
+    ip = click.prompt("🔗 IP Address")
+
+    manager = AWSClient()
+
+    with console.status("Creating record...", spinner="line"):
+        # שולחים UPSERT
+        success, msg = manager.manage_dns_record(zone_name, 'UPSERT', name, ip)
+
+    if success:
+        console.print(f"[bold green] {msg}")
+    else:
+        console.print(f"[bold red] {msg}")
+
 @arc.group()
 def delete():
     """Delete resources"""
@@ -199,10 +273,9 @@ def delete_s3(name):
     if not click.confirm(f"Are you SURE you want to delete '{name}'? This cannot be undone."):
         click.echo("Delete aborted.")
         return
-
+    click.secho(f"deleting bucket...")
     manager = AWSClient()
     success, message = manager.delete_bucket(name)
-    click.secho(f"deleting bucket...")
     if success:
         click.secho(f"{message}", fg='green', bold=True)
     else:
@@ -230,6 +303,52 @@ def delete_ec2(name_or_id):
         click.secho(f"{message}", fg='green', bold=True)
     else:
         click.secho(f" Error: {message}", fg='red')
+
+
+@delete.command(name="zone")
+@click.argument('domain_name')
+def delete_zone(domain_name):
+    """Delete an ARC-managed Hosted Zone by NAME"""
+
+    # וידוא בטיחות מול המשתמש
+    if not click.confirm(f"WARNING: Are you sure you want to delete the zone '{domain_name}'?"):
+        click.echo("Operation cancelled.")
+        return
+
+    manager = AWSClient()
+
+    # שימוש ב-Rich לספינר (אם התקנת) או Click רגיל
+    with console.status(f"Deleting zone {domain_name}...", spinner="line"):
+        success, message = manager.delete_hosted_zone(domain_name)
+
+    if success:
+        console.print(f"[bold green]✅ {message}")
+    else:
+        console.print(f"[bold red]❌ {message}")
+
+
+@delete.command(name="record")
+@click.argument('zone_name')
+def delete_record(zone_name):
+    """Delete an existing DNS record"""
+
+    console.print(f"[bold red]Delete Record from:[/bold red] {zone_name}")
+
+    # במחיקה חייבים לדייק
+    name = click.prompt("📝 Name to delete (e.g. 'www')", default="www")
+    ip = click.prompt("🔗 The existing IP value (must match)")
+
+    if click.confirm(f"⚠️  Delete {name}.{zone_name} -> {ip}?"):
+        manager = AWSClient()
+
+        with console.status("[red]Deleting record...", spinner="line"):
+            # שולחים DELETE
+            success, msg = manager.manage_dns_record(zone_name, 'DELETE', name, ip)
+
+        if success:
+            console.print(f"[bold green]✅ {msg}")
+        else:
+            console.print(f"[bold red]❌ {msg}")
 
 
 @arc.group(name="stop")

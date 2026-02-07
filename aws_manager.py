@@ -5,13 +5,12 @@ from pathlib import Path
 
 
 class AWSClient:
-    # הגדרת תיקיית הבית והקונפיגורציה של ARC
+    # ARC dir configuration
     ARC_HOME = Path.home() / ".arc"
     KEYS_DIR = ARC_HOME / "keys"
     CONFIG_PATH = KEYS_DIR / "config.json"
 
     def __init__(self, access_key=None, secret_key=None, region=None):
-        # יצירת התיקיות פיזית על המחשב אם הן לא קיימות
         self.ARC_HOME.mkdir(exist_ok=True)
         self.KEYS_DIR.mkdir(exist_ok=True)
 
@@ -32,6 +31,8 @@ class AWSClient:
             self.sts = self.session.client('sts')
             self.s3 = self.session.client('s3')
             self.ec2 = self.session.client('ec2')
+            self.r53 = self.session.client('route53')
+            self.ssm = self.session.client('ssm')
 
         except Exception as e:
             print(f"Connection Error: {e}")
@@ -125,6 +126,75 @@ class AWSClient:
         except Exception:
             return []
 
+    def list_hosted_zones(self):
+        """מחזיר רשימה של Hosted Zones שנוצרו על ידי ARC בלבד"""
+        try:
+            response = self.r53.list_hosted_zones()
+            arc_zones = []
+
+            for z in response.get('HostedZones', []):
+                zone_id = z['Id'].split('/')[-1]
+
+                # אנחנו בודקים אם ה-Comment מכיל את מילת המפתח שלנו
+                # הערה: כדי להיות בטוחים ב-100%, אפשר גם למשוך את ה-Tags של ה-Zone
+                config = z.get('Config', {})
+                comment = config.get('Comment', '')
+
+                if "Created by ARC" in comment:
+                    arc_zones.append({
+                        'id': zone_id,
+                        'name': z['Name'],
+                        'records': z.get('ResourceRecordSetCount', 0),
+                        'comment': comment
+                    })
+            return arc_zones
+        except Exception as e:
+            print(f"Error listing zones: {e}")
+            return []
+
+    def list_hosted_zones(self):
+        """מחזיר רשימה של Hosted Zones שנוצרו על ידי ARC בלבד"""
+        try:
+            response = self.r53.list_hosted_zones()
+            arc_zones = []
+
+            for z in response.get('HostedZones', []):
+                zone_id = z['Id'].split('/')[-1]
+
+                # אנחנו בודקים אם ה-Comment מכיל את מילת המפתח שלנו
+                # הערה: כדי להיות בטוחים ב-100%, אפשר גם למשוך את ה-Tags של ה-Zone
+                config = z.get('Config', {})
+                comment = config.get('Comment', '')
+
+                if "Created by ARC" in comment:
+                    arc_zones.append({
+                        'id': zone_id,
+                        'name': z['Name'],
+                        'records': z.get('ResourceRecordSetCount', 0),
+                        'comment': comment
+                    })
+            return arc_zones
+        except Exception as e:
+            print(f"Error listing zones: {e}")
+            return []
+
+    def get_zone_id_by_name(self, domain_name):
+        """מוצא ID בצורה חכמה (מתעלם מנקודות בסוף)"""
+        # 1. ניקוי הקלט: אותיות קטנות + הסרת נקודה בסוף
+        clean_input = domain_name.lower().rstrip('.')
+
+        # 2. שליפת כל הזונים
+        zones = self.list_hosted_zones()
+
+        # 3. מעבר על הרשימה והשוואה "נקייה"
+        for z in zones:
+            # ניקוי השם שמגיע מ-AWS
+            clean_zone_name = z['name'].lower().rstrip('.')
+
+            if clean_input == clean_zone_name:
+                return z['id']
+
+        return None
     # ---------- יצירת משאבים (CREATE) ----------
 
     def create_bucket(self, bucket_name, is_public=False):
@@ -162,13 +232,19 @@ class AWSClient:
             if len(running) >= 2:
                 return False, "Quota exceeded: 2 ARC instances are already running."
 
-            ami_map = {
-                'AL2023': 'ami-0532be01f26a3de55',
-                'UBUNTU': 'ami-0b6c6ebed2801a5cb'
+            ssm_paths = {
+                'AL2023': '/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64',
+                'UBUNTU': '/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id'
             }
+            path = ssm_paths.get(os_type.upper())
+            if not path:
+                return False, f"OS type '{os_type}' not supported."
+
+            ssm_response = self.ssm.get_parameter(Name=path)
+            ami_id = ssm_response['Parameter']['Value']
 
             launch_params = {
-                'ImageId': ami_map.get(os_type.upper()),
+                'ImageId': ami_id,
                 'InstanceType': instance_type.lower(),
                 'KeyName': key_name,
                 'MinCount': 1,
@@ -187,6 +263,130 @@ class AWSClient:
         except Exception as e:
             return False, str(e)
 
+    def create_hosted_zone(self, domain_name):
+        """יוצר Hosted Zone חדש ב-Route 53"""
+        try:
+            # יצירת מזהה ייחודי לבקשה (CallerReference) כדי למנוע כפילויות
+            import time
+            caller_ref = str(time.time())
+
+            response = self.r53.create_hosted_zone(
+                Name=domain_name,
+                CallerReference=caller_ref,
+                HostedZoneConfig={
+                    'Comment': f'Created by ARC CLI for {domain_name}',
+                    'PrivateZone': False  # נתחיל עם Public Zone (הכי נפוץ)
+                }
+            )
+
+            zone_id = response['HostedZone']['Id'].split('/')[-1]
+            ns_records = response['DelegationSet']['NameServers']
+
+            return True, {
+                'id': zone_id,
+                'name_servers': ns_records
+            }
+        except Exception as e:
+            return False, str(e)
+
+    def create_dns_record(self, zone_name, record_name, record_type, value, ttl=300):
+        """יוצר רשומה ב-Route 53 בצורה חכמה"""
+        try:
+            # 1. מציאת ה-ID של הזון
+            zone_id = self.get_zone_id_by_name(zone_name)
+            if not zone_id:
+                return False, f"Zone '{zone_name}' not found."
+
+            # 2. הבנת הדומיין המלא
+            # אנו שואבים את השם האמיתי מ-AWS כדי למנוע טעויות
+            zone_info = self.r53.get_hosted_zone(Id=zone_id)
+            full_domain = zone_info['HostedZone']['Name'].rstrip('.')
+
+            # 3. בניית שם הרשומה
+            if record_name == '@' or record_name == '':
+                final_name = full_domain
+            else:
+                final_name = f"{record_name}.{full_domain}"
+
+            # 4. שליחת הבקשה ל-AWS
+            change_batch = {
+                'Changes': [{
+                    'Action': 'UPSERT',
+                    'ResourceRecordSet': {
+                        'Name': final_name,
+                        'Type': record_type,
+                        'TTL': int(ttl),
+                        'ResourceRecords': [{'Value': value}]
+                    }
+                }]
+            }
+
+            self.r53.change_resource_record_sets(
+                HostedZoneId=zone_id,
+                ChangeBatch=change_batch
+            )
+
+            return True, f"Created {record_type} record: {final_name} -> {value}"
+
+        except Exception as e:
+            return False, str(e)
+
+    def manage_dns_record(self, zone_name, action, record_prefix, value):
+        """
+        פונקציה מרכזית לניהול רשומות (יצירה ומחיקה).
+        Action: 'UPSERT' (ליצירה/עדכון) או 'DELETE' (למחיקה).
+        """
+        try:
+            # 1. שלב האבטחה: האם הזון הזה קיים והאם הוא של ARC?
+            # אנחנו משתמשים בפונקציה list_hosted_zones שכבר מסננת לפי ההערה
+            arc_zones = self.list_hosted_zones()
+
+            # חיפוש ה-ID ברשימה המורשית
+            target_zone_id = None
+            clean_input_name = zone_name.strip('.')  # ניקוי נקודות מהקלט
+
+            for z in arc_zones:
+                if z['name'].strip('.') == clean_input_name:
+                    target_zone_id = z['id']
+                    break
+
+            if not target_zone_id:
+                return False, f"Access Denied: Zone '{zone_name}' is not managed by ARC."
+
+            # 2. סידור השם המלא (למשל www.alon.com)
+            zone_info = self.r53.get_hosted_zone(Id=target_zone_id)
+            full_domain = zone_info['HostedZone']['Name'].rstrip('.')
+
+            if record_prefix == '@' or record_prefix == '':
+                final_name = f"{full_domain}."
+            else:
+                final_name = f"{record_prefix}.{full_domain}."
+
+            # 3. ביצוע הפעולה מול AWS
+            self.r53.change_resource_record_sets(
+                HostedZoneId=target_zone_id,
+                ChangeBatch={
+                    'Comment': f'{action} by ARC CLI',
+                    'Changes': [{
+                        'Action': action,  # כאן הקסם: או UPSERT או DELETE
+                        'ResourceRecordSet': {
+                            'Name': final_name,
+                            'Type': 'A',  # שמרנו על פשטות (A Record בלבד)
+                            'TTL': 300,
+                            'ResourceRecords': [{'Value': value}]
+                        }
+                    }]
+                }
+            )
+
+            verb = "Created/Updated" if action == 'UPSERT' else "Deleted"
+            return True, f"{verb}: {final_name} -> {value}"
+
+        except Exception as e:
+            # שגיאה נפוצה במחיקה: הערך לא תואם
+            if "InvalidChangeBatch" in str(e):
+                return False, "Error: To delete a record, the IP must match exactly what's in AWS."
+            return False, str(e)
     # ---------- פעולות (DELETE / UPLOAD) ----------
 
     def delete_bucket(self, bucket_name):
@@ -212,6 +412,29 @@ class AWSClient:
             self.ec2.terminate_instances(InstanceIds=[instance_id])
             return True, f"Termination request for {name_or_id} sent successfully."
         except Exception as e:
+            return False, str(e)
+
+        return target['id'] if target else None
+
+    def delete_hosted_zone(self, name_or_id):
+        """מוחק Zone לפי שם או ID"""
+        try:
+            zone_id = name_or_id
+
+            # אם זה לא נראה כמו ID (לא מתחיל ב-Z), ננסה למצוא את ה-ID לפי השם
+            if not name_or_id.startswith('Z'):
+                found_id = self.get_zone_id_by_name(name_or_id)
+                if not found_id:
+                    return False, f"Hosted Zone '{name_or_id}' not found."
+                zone_id = found_id
+
+            # ביצוע המחיקה
+            self.r53.delete_hosted_zone(Id=zone_id)
+            return True, f"Hosted Zone {zone_id} ({name_or_id}) deleted successfully."
+        except Exception as e:
+            # שגיאה נפוצה: ה-Zone לא ריק
+            if "HostedZoneNotEmpty" in str(e):
+                return False, "Error: The zone is not empty. You must delete all records (except NS/SOA) first."
             return False, str(e)
 
     def manage_instance(self, name_or_id, action):
