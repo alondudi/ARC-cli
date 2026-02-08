@@ -4,6 +4,7 @@ setup(
     name='arc-cli',
     version='0.1.1',
     author='Alon',
+    packages=find_packages(),
     description='ARC - Amazon Resources Controller CLI',
     long_description=open('README.md').read() if hasattr(open('README.md'), 'read') else '',
     long_description_content_type='text/markdown',
