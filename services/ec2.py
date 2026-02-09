@@ -1,4 +1,7 @@
 from .base import BaseService
+import os       # <--- הוסף את השורה הזאת!
+import stat
+import boto3
 
 
 class EC2Service(BaseService):
@@ -32,40 +35,68 @@ class EC2Service(BaseService):
         except Exception:
             return []
 
-    def create_instance(self, instance_name, os_type, instance_type, key_name, user_data=None):
+    def get_latest_ami(self, os_type):
+        """שליפת ה-AMI העדכני ביותר דרך SSM Parameter Store"""
+        # מיפוי נתיבים לפרמטרים הציבוריים של AWS
+        ssm_paths = {
+            'AL2023': '/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64',
+            'UBUNTU': '/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id'
+        }
+
+        path = ssm_paths.get(os_type)
+        if not path:
+            return None
+
         try:
-            running = [i for i in self.get_arc_instances() if i['status'] == 'running']
-            if len(running) >= 2:
-                return False, "Quota exceeded: 2 ARC instances are already running."
+            response = self.ssm.get_parameter(Name=path)
+            return response['Parameter']['Value']
+        except Exception:
+            return None
 
-            ssm_paths = {
-                'AL2023': '/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64',
-                'UBUNTU': '/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id'
-            }
-            path = ssm_paths.get(os_type.upper())
-            if not path:
-                return False, f"OS type '{os_type}' not supported."
+    def create_instance(self, instance_name, os_type, instance_type, key_name, user_data=None):
+        """יצירת שרת עם תיוג אוטומטי של המשתמש והכלי"""
+        try:
+            # 1. זיהוי המשתמש המריץ (Owner)
+            caller = self.sts.get_caller_identity()
+            arn = caller.get('Arn')
+            # גזירת שם המשתמש מה-ARN (למשל: arn:aws:iam::123:user/Alon -> Alon)
+            username = arn.split('/')[-1]
 
-            ssm_response = self.ssm.get_parameter(Name=path)
-            ami_id = ssm_response['Parameter']['Value']
+            # 2. השגת ה-AMI העדכני
+            ami_id = self.get_latest_ami(os_type)
+            if not ami_id:
+                return False, f"Could not find AMI for {os_type}"
 
-            launch_params = {
-                'ImageId': ami_id,
-                'InstanceType': instance_type.lower(),
-                'KeyName': key_name,
-                'MinCount': 1,
-                'MaxCount': 1,
-                'TagSpecifications': [{
+            tags = [
+                {'Key': 'Name', 'Value': instance_name},
+                {'Key': 'Owner', 'Value': username},  # תיוג המשתמש
+                {'Key': 'Tool', 'Value': 'ARC'}  # תיוג הכלי לסינון עתידי
+            ]
+
+            # 4. יצירת השרת
+            response = self.ec2.run_instances(
+                ImageId=ami_id,
+                InstanceType=instance_type,
+                KeyName=key_name,
+                MinCount=1,
+                MaxCount=1,
+                UserData=user_data or '',
+                TagSpecifications=[{
                     'ResourceType': 'instance',
-                    'Tags': [{'Key': 'Name', 'Value': instance_name}, {'Key': 'Tool', 'Value': 'ARC'}]
+                    'Tags': tags
                 }]
-            }
-            if user_data:
-                launch_params['UserData'] = user_data
+            )
 
-            response = self.ec2.run_instances(**launch_params)
-            new_id = response['Instances'][0]['InstanceId']
-            return True, f"Launched {instance_name} ({instance_type}) with key '{key_name}'. ID: {new_id}"
+            instance_id = response['Instances'][0]['InstanceId']
+
+            waiter = self.ec2.get_waiter('instance_running')
+            waiter.wait(InstanceIds=[instance_id])
+
+            instance_desc = self.ec2.describe_instances(InstanceIds=[instance_id])
+            public_ip = instance_desc['Reservations'][0]['Instances'][0].get('PublicIpAddress', 'No Public IP')
+
+            return True, f"Server '{instance_name}' created successfully."
+
         except Exception as e:
             return False, str(e)
 
@@ -119,6 +150,55 @@ class EC2Service(BaseService):
             # 4. ביצוע הפעולה
             actions[action](InstanceIds=[instance_id])
             return True, f"{action.capitalize()} request sent for {name_or_id}."
+
+        except Exception as e:
+            return False, str(e)
+
+    def get_available_local_keys(self):
+        """מחזיר רשימה של מפתחות שקיימים גם ב-AWS וגם בתיקייה המקומית"""
+        try:
+            # 1. שליפת כל המפתחות מ-AWS
+            aws_response = self.ec2.describe_key_pairs()
+            aws_keys = [k['KeyName'] for k in aws_response.get('KeyPairs', [])]
+
+            # 2. בדיקה מה קיים פיזית בתיקייה
+            if not self.KEYS_DIR.exists():
+                return []
+
+            local_files = os.listdir(self.KEYS_DIR)
+            valid_keys = []
+
+            for key in aws_keys:
+                # בודק אם קיים קובץ pem או ppk
+                if f"{key}.pem" in local_files:
+                    valid_keys.append(key)
+
+            return valid_keys
+        except Exception as e:
+            print(f"Error listing keys: {e}")
+            return []
+
+    def create_new_key_pair(self, key_name):
+        """יוצר מפתח חדש ב-AWS ושומר אותו למחשב"""
+        try:
+            # 1. יצירת המפתח ב-AWS
+            response = self.ec2.create_key_pair(KeyName=key_name)
+
+            # 2. שליפת התוכן הסודי (ה-Private Key)
+            key_material = response['KeyMaterial']
+
+            # 3. שמירה לקובץ
+            file_path = self.KEYS_DIR / f"{key_name}.pem"
+            file_path.write_text(key_material)
+
+            # 4. אבטחה (חובה בלינוקס/מק, טוב גם לווינדוס)
+            # מגן על הקובץ שרק אתה תוכל לקרוא אותו
+            try:
+                os.chmod(file_path, stat.S_IRUSR)
+            except:
+                pass
+
+            return True, str(file_path)
 
         except Exception as e:
             return False, str(e)

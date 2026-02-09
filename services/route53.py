@@ -51,7 +51,7 @@ class Route53Service(BaseService):
     def create_hosted_zone(self, domain_name):
         """יוצר Hosted Zone חדש"""
         try:
-            caller_ref = str(time.time())  # מונע כפילויות בבקשות
+            caller_ref = str(time.time())  # מונע כפילויות
 
             response = self.r53.create_hosted_zone(
                 Name=domain_name,
@@ -62,11 +62,15 @@ class Route53Service(BaseService):
                 }
             )
 
-            zone_id = response['HostedZone']['Id'].split('/')[-1]
+            # שליפת השם (במקום ה-ID)
+            # AWS מחזירים עם נקודה בסוף, אז אנחנו מורידים אותה
+            zone_name = response['HostedZone']['Name'].rstrip('.')
+
+            # שליפת רשומות ה-NS
             ns_records = response['DelegationSet']['NameServers']
 
             return True, {
-                'id': zone_id,
+                'name': zone_name,  # <--- הנה השינוי שביקשת
                 'name_servers': ns_records
             }
         except Exception as e:
