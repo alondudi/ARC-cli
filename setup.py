@@ -2,14 +2,16 @@ from setuptools import setup, find_packages
 
 setup(
     name='arc-cli',
-    version='0.1.1',
+    version='1.0.0',
     author='Alon',
-    packages=find_packages(),
     description='ARC - Amazon Resources Controller CLI',
-    long_description=open('README.md').read() if hasattr(open('README.md'), 'read') else '',
+
+    long_description=open('README.md', encoding='utf-8').read() if hasattr(open('README.md'), 'read') else '',
     long_description_content_type='text/markdown',
 
-    py_modules=['arc_cli', 'aws_manager'],
+    packages=find_packages(),
+
+    py_modules=['arc_cli'],
 
     install_requires=[
         'Click>=8.0',
@@ -18,16 +20,10 @@ setup(
         'rich',
     ],
 
-    entry_points={
-        'console_scripts': [
-            'arc = arc_cli:arc',
-        ],
-    },
+    entry_points='''
+        [console_scripts]
+        arc=arc_cli:arc
+    ''',
 
     python_requires='>=3.7',
-    classifiers=[
-        'Programming Language :: Python :: 3',
-        'License :: OSI Approved :: MIT License',
-        'Operating System :: OS Independent',
-    ],
 )
