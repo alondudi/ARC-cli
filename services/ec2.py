@@ -1,5 +1,5 @@
 from .base import BaseService
-import os       # <--- הוסף את השורה הזאת!
+import os
 import stat
 import boto3
 
@@ -37,7 +37,6 @@ class EC2Service(BaseService):
 
     def get_latest_ami(self, os_type):
         """שליפת ה-AMI העדכני ביותר דרך SSM Parameter Store"""
-        # מיפוי נתיבים לפרמטרים הציבוריים של AWS
         ssm_paths = {
             'AL2023': '/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64',
             'UBUNTU': '/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id'
@@ -53,27 +52,47 @@ class EC2Service(BaseService):
         except Exception:
             return None
 
-    def create_instance(self, instance_name, os_type, instance_type, key_name, user_data=None):
-        """יצירת שרת עם תיוג אוטומטי של המשתמש והכלי"""
+    def check_quota_status(self):
+        """בדיקה מקדימה האם המשתמש חרג מהמכסה"""
         try:
-            # 1. זיהוי המשתמש המריץ (Owner)
+            caller = self.sts.get_caller_identity()
+            username = caller.get('Arn').split('/')[-1]
+            quota_filters = [
+                {'Name': 'tag:Tool', 'Values': ['ARC']},
+                {'Name': 'tag:Owner', 'Values': [username]},
+                {'Name': 'instance-state-name', 'Values': ['pending', 'running', 'stopped', 'stopping']}
+            ]
+
+            existing = self.ec2.describe_instances(Filters=quota_filters)
+
+            current_count = 0
+            for reservation in existing['Reservations']:
+                current_count += len(reservation['Instances'])
+
+            if current_count >= 2:
+                return False, f"Quota Exceeded: You have {current_count} active servers. The limit is 2."
+
+            return True, "Quota OK"
+
+        except Exception as e:
+            return False, f"Error checking quota: {str(e)}"
+
+    def create_instance(self, instance_name, os_type, instance_type, key_name, user_data=None):
+        """create instance"""
+        try:
             caller = self.sts.get_caller_identity()
             arn = caller.get('Arn')
-            # גזירת שם המשתמש מה-ARN (למשל: arn:aws:iam::123:user/Alon -> Alon)
             username = arn.split('/')[-1]
-
-            # 2. השגת ה-AMI העדכני
             ami_id = self.get_latest_ami(os_type)
             if not ami_id:
                 return False, f"Could not find AMI for {os_type}"
 
             tags = [
                 {'Key': 'Name', 'Value': instance_name},
-                {'Key': 'Owner', 'Value': username},  # תיוג המשתמש
-                {'Key': 'Tool', 'Value': 'ARC'}  # תיוג הכלי לסינון עתידי
+                {'Key': 'Owner', 'Value': username},
+                {'Key': 'Tool', 'Value': 'ARC'}
             ]
 
-            # 4. יצירת השרת
             response = self.ec2.run_instances(
                 ImageId=ami_id,
                 InstanceType=instance_type,
@@ -88,12 +107,8 @@ class EC2Service(BaseService):
             )
 
             instance_id = response['Instances'][0]['InstanceId']
-
             waiter = self.ec2.get_waiter('instance_running')
             waiter.wait(InstanceIds=[instance_id])
-
-            instance_desc = self.ec2.describe_instances(InstanceIds=[instance_id])
-            public_ip = instance_desc['Reservations'][0]['Instances'][0].get('PublicIpAddress', 'No Public IP')
 
             return True, f"Server '{instance_name}' created successfully."
 
@@ -101,7 +116,7 @@ class EC2Service(BaseService):
             return False, str(e)
 
     def terminate_instance(self, name_or_id):
-        """מחיקת שרת לפי שם או ID"""
+        """Delete instance"""
         try:
             instance_id = name_or_id
 
@@ -121,10 +136,7 @@ class EC2Service(BaseService):
             return False, str(e)
 
     def manage_instance(self, name_or_id, action):
-        """
-        ניהול חכם של מצב השרת (start, stop ).
-        בודק את המצב הנוכחי כדי למנוע פעולות כפולות.
-        """
+        """ec2 management stop or start """
         try:
             instances = self.get_arc_instances()
             target = next((i for i in instances if i['name'] == name_or_id or i['id'] == name_or_id), None)
@@ -141,13 +153,11 @@ class EC2Service(BaseService):
             if action == 'start' and current_status == 'running':
                 return False, f"Instance '{name_or_id}' is already running. No action taken."
 
-            # 3. מיפוי הפקודות של Boto3
             actions = {
                 'start': self.ec2.start_instances,
                 'stop': self.ec2.stop_instances,
             }
 
-            # 4. ביצוע הפעולה
             actions[action](InstanceIds=[instance_id])
             return True, f"{action.capitalize()} request sent for {name_or_id}."
 
@@ -155,13 +165,11 @@ class EC2Service(BaseService):
             return False, str(e)
 
     def get_available_local_keys(self):
-        """מחזיר רשימה של מפתחות שקיימים גם ב-AWS וגם בתיקייה המקומית"""
+        """EC2 key pairs from local directory"""
         try:
-            # 1. שליפת כל המפתחות מ-AWS
             aws_response = self.ec2.describe_key_pairs()
             aws_keys = [k['KeyName'] for k in aws_response.get('KeyPairs', [])]
 
-            # 2. בדיקה מה קיים פיזית בתיקייה
             if not self.KEYS_DIR.exists():
                 return []
 
@@ -169,7 +177,6 @@ class EC2Service(BaseService):
             valid_keys = []
 
             for key in aws_keys:
-                # בודק אם קיים קובץ pem או ppk
                 if f"{key}.pem" in local_files:
                     valid_keys.append(key)
 
@@ -179,20 +186,13 @@ class EC2Service(BaseService):
             return []
 
     def create_new_key_pair(self, key_name):
-        """יוצר מפתח חדש ב-AWS ושומר אותו למחשב"""
+        """create key pair"""
         try:
-            # 1. יצירת המפתח ב-AWS
             response = self.ec2.create_key_pair(KeyName=key_name)
-
-            # 2. שליפת התוכן הסודי (ה-Private Key)
             key_material = response['KeyMaterial']
-
-            # 3. שמירה לקובץ
             file_path = self.KEYS_DIR / f"{key_name}.pem"
             file_path.write_text(key_material)
 
-            # 4. אבטחה (חובה בלינוקס/מק, טוב גם לווינדוס)
-            # מגן על הקובץ שרק אתה תוכל לקרוא אותו
             try:
                 os.chmod(file_path, stat.S_IRUSR)
             except:

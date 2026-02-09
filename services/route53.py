@@ -8,7 +8,7 @@ class Route53Service(BaseService):
         self.r53 = self.session.client('route53')
 
     def list_hosted_zones(self):
-        """מחזיר רשימה של Hosted Zones שנוצרו על ידי ARC בלבד"""
+        """List ARC managed Hosted Zone"""
         try:
             response = self.r53.list_hosted_zones()
             arc_zones = []
@@ -16,7 +16,6 @@ class Route53Service(BaseService):
             for z in response.get('HostedZones', []):
                 zone_id = z['Id'].split('/')[-1]
 
-                # בדיקה האם הזון נוצר על ידי הכלי שלנו
                 config = z.get('Config', {})
                 comment = config.get('Comment', '')
 
@@ -29,18 +28,13 @@ class Route53Service(BaseService):
                     })
             return arc_zones
         except Exception as e:
-            # במקרה של שגיאה (למשל אין הרשאות), נחזיר רשימה ריקה
             return []
 
     def get_zone_id_by_name(self, domain_name):
-        """פונקציית עזר: מוצאת ID לפי שם (מתעלמת מנקודות)"""
-        # 1. ניקוי הקלט
+        """Get zone id by name"""
         clean_input = domain_name.lower().rstrip('.')
-
-        # 2. שליפת הזונים של ARC בלבד
         zones = self.list_hosted_zones()
 
-        # 3. חיפוש
         for z in zones:
             clean_zone_name = z['name'].lower().rstrip('.')
             if clean_input == clean_zone_name:
@@ -49,9 +43,9 @@ class Route53Service(BaseService):
         return None
 
     def create_hosted_zone(self, domain_name):
-        """יוצר Hosted Zone חדש"""
+        """Create Hosted Zone"""
         try:
-            caller_ref = str(time.time())  # מונע כפילויות
+            caller_ref = str(time.time())
 
             response = self.r53.create_hosted_zone(
                 Name=domain_name,
@@ -61,54 +55,65 @@ class Route53Service(BaseService):
                     'PrivateZone': False
                 }
             )
-
-            # שליפת השם (במקום ה-ID)
-            # AWS מחזירים עם נקודה בסוף, אז אנחנו מורידים אותה
             zone_name = response['HostedZone']['Name'].rstrip('.')
-
-            # שליפת רשומות ה-NS
             ns_records = response['DelegationSet']['NameServers']
 
             return True, {
-                'name': zone_name,  # <--- הנה השינוי שביקשת
+                'name': zone_name,
                 'name_servers': ns_records
             }
         except Exception as e:
             return False, str(e)
 
-    def delete_hosted_zone(self, name_or_id):
-        """מוחק Hosted Zone (רק אם הוא של ARC)"""
+    def delete_hosted_zone(self, name_or_id, force=False):
+        """Delete Hosted Zone"""
         try:
             zone_id = name_or_id
 
-            # אם קיבלנו שם, נחפש את ה-ID
             if not name_or_id.startswith('Z'):
                 found_id = self.get_zone_id_by_name(name_or_id)
                 if not found_id:
-                    return False, f"Hosted Zone '{name_or_id}' not found inside ARC managed zones."
+                    return False, f"Zone '{name_or_id}' not found."
                 zone_id = found_id
 
-            # מחיקה
+            if force:
+                try:
+                    records = self.r53.list_resource_record_sets(HostedZoneId=zone_id)['ResourceRecordSets']
+
+                    changes = []
+                    for record in records:
+                        if record['Type'] in ['SOA', 'NS']:
+                            continue
+
+                        changes.append({
+                            'Action': 'DELETE',
+                            'ResourceRecordSet': record
+                        })
+
+                    if changes:
+                        self.r53.change_resource_record_sets(
+                            HostedZoneId=zone_id,
+                            ChangeBatch={'Changes': changes}
+                        )
+                except Exception as e:
+                    return False, f"Failed to clean records: {str(e)}"
+
             self.r53.delete_hosted_zone(Id=zone_id)
-            return True, f"Hosted Zone {zone_id} ({name_or_id}) deleted successfully."
+            return True, f"Zone {zone_id} deleted successfully."
+
         except Exception as e:
             if "HostedZoneNotEmpty" in str(e):
-                return False, "Error: Zone is not empty. Delete all records first."
+                return False, "Error: Zone contains records. Use --all (in CLI) or force delete."
             return False, str(e)
 
     def manage_dns_record(self, zone_name, action, record_prefix, value):
-        """
-        ניהול רשומות: יצירה (UPSERT) או מחיקה (DELETE).
-        בודק שהזון שייך ל-ARC לפני ביצוע הפעולה.
-        """
+        """Create and delete DNS records"""
         try:
-            # 1. מציאת הזון ואימות שהוא שלנו
             zone_id = self.get_zone_id_by_name(zone_name)
 
             if not zone_id:
                 return False, f"Access Denied: Zone '{zone_name}' is not managed by ARC."
 
-            # 2. הבנת הדומיין המלא כדי לבנות את שם הרשומה
             zone_info = self.r53.get_hosted_zone(Id=zone_id)
             full_domain = zone_info['HostedZone']['Name'].rstrip('.')
 
@@ -117,7 +122,6 @@ class Route53Service(BaseService):
             else:
                 final_name = f"{record_prefix}.{full_domain}."
 
-            # 3. ביצוע הפעולה
             self.r53.change_resource_record_sets(
                 HostedZoneId=zone_id,
                 ChangeBatch={
@@ -126,7 +130,7 @@ class Route53Service(BaseService):
                         'Action': action,
                         'ResourceRecordSet': {
                             'Name': final_name,
-                            'Type': 'A',  # כרגע תומך רק ב-A Record לפשטות
+                            'Type': 'A',
                             'TTL': 300,
                             'ResourceRecords': [{'Value': value}]
                         }

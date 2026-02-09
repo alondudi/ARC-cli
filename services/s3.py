@@ -1,6 +1,7 @@
 import os
 import json
 from .base import BaseService
+import boto3
 
 
 class S3Service(BaseService):
@@ -11,7 +12,7 @@ class S3Service(BaseService):
         self.region = self.session.region_name
 
     def get_arc_buckets(self):
-        """מחזיר רשימה של באקטים שמנוהלים ע"י ARC"""
+        """List ARC managed s3 buckets"""
         arc_buckets = []
         try:
             response = self.s3.list_buckets()
@@ -32,7 +33,7 @@ class S3Service(BaseService):
             return []
 
     def create_bucket(self, bucket_name, is_public=False):
-        """יצירת באקט חדש"""
+        """Create s3 bucket"""
         try:
             current_buckets = self.get_arc_buckets()
             if len(current_buckets) >= 2:
@@ -82,21 +83,30 @@ class S3Service(BaseService):
         except Exception as e:
             return False, str(e)
 
-    def delete_bucket(self, bucket_name):
-        """מחיקת באקט"""
+    def delete_bucket(self, bucket_name, force=False):
+        """Delete s3 bucket"""
         try:
             if bucket_name not in self.get_arc_buckets():
-                return False, "Permission Denied: Not an ARC bucket."
+                return False, f"Skipping '{bucket_name}': Not managed by ARC."
 
-            self.s3.delete_bucket(Bucket=bucket_name)
-            return True, f"Bucket '{bucket_name}' deleted."
+            s3_resource = self.session.resource('s3')
+            bucket = s3_resource.Bucket(bucket_name)
+            if force:
+                try:
+                    bucket.object_versions.all().delete()
+                    bucket.objects.all().delete()
+                except Exception as e:
+                    return False, f"Failed to empty bucket: {e}"
+            bucket.delete()
+            return True, f"Deleted '{bucket_name}'"
+
         except Exception as e:
             if "BucketNotEmpty" in str(e):
-                return False, "Error: Bucket is not empty. Please empty it first."
+                return False, f"Bucket '{bucket_name}' is not empty."
             return False, str(e)
 
     def upload_to_s3(self, file_path, bucket_name):
-        """העלאת קובץ"""
+        """Upload files to s3"""
         try:
             if bucket_name not in self.get_arc_buckets():
                 return False, "Access Denied: Not an ARC bucket."
