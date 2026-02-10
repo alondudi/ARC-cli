@@ -165,7 +165,7 @@ def create_s3(name, public):
         if not click.confirm("Are you sure you want to proceed?"):
             click.echo("Operation aborted. Your security is important")
             return
-    with console.status(f"Creating bucket '{name}'...", spinner="line"):
+    with console.status(f"Creating bucket {click.style(name, fg='cyan')}...", spinner="line"):
         manager = AWSClient()
         success, message = manager.create_bucket(name, is_public=public)
     if success:
@@ -211,14 +211,14 @@ def create_ec2(name):
 
     if choice == "0":
         new_key_name = click.prompt("Enter new key name")
-        with console.status(f"Creating key '{new_key_name}'...", spinner="line"):
+        with console.status(f"Creating key {click.style(new_key_name, fg='cyan')}...", spinner="line"):
             success, result = manager.create_new_key_pair(new_key_name)
 
         if success:
-            console.print(f"[bold green]✅ Key created and saved to:[/bold green] {result}")
+            console.print(f"[bold green]Key created and saved to:[/bold green] {result}")
             selected_key = new_key_name
         else:
-            console.print(f"[bold red]❌ Failed to create key:[/bold red] {result}")
+            console.print(f"[bold red]Failed to create key:[/bold red] {result}")
             return
 
     else:
@@ -228,10 +228,10 @@ def create_ec2(name):
                 selected_key = available_keys[idx]
                 console.print(f"Selected key: [bold green]{selected_key}[/bold green]")
             else:
-                console.print("[bold red]❌ Invalid selection![/bold red]")
+                console.print("[bold red]Invalid selection![/bold red]")
                 return
         except ValueError:
-            console.print("[bold red]❌ Invalid input! Please enter a number.[/bold red]")
+            console.print("[bold red]Invalid input! Please enter a number.[/bold red]")
             return
 
     os_choice = click.prompt("OS", type=click.Choice(['AL2023', 'UBUNTU'], case_sensitive=False))
@@ -248,7 +248,7 @@ def create_ec2(name):
         user_data = "\n".join(lines)
 
     if click.confirm(f"Launch server '{name}'?"):
-        with console.status("lunching instance...", spinner="line"):
+        with console.status(f"lunching instance {click.style(name, fg='cyan')}...", spinner="line"):
             success, message = manager.create_instance(
                 instance_name=name,
                 os_type=os_choice,
@@ -268,7 +268,7 @@ def create_ec2(name):
 @click.argument('domain_name')
 def create_zone(domain_name):
     """Create a new Public Hosted Zone"""
-    with console.status(f"Creating Hosted Zone for {click.style(domain_name, fg='cyan')}..."):
+    with console.status(f"Creating Hosted Zone for {click.style(domain_name, fg='cyan')}...", spinner="line"):
         manager = AWSClient()
         success, result = manager.create_hosted_zone(domain_name)
 
@@ -288,7 +288,7 @@ def create_record(zone_name):
     click.echo(f"Add Record to: {zone_name}")
     name = click.prompt(" Name (e.g. 'www' or '@')", default="www")
     ip = click.prompt("🔗 IP Address")
-    with console.status("Creating record...", spinner="line"):
+    with console.status(f"Creating record {click.style(name, fg='cyan')}...", spinner="line"):
         manager = AWSClient()
         success, msg = manager.manage_dns_record(zone_name, 'UPSERT', name, ip)
 
@@ -319,8 +319,8 @@ def delete_s3(name, all):
             return
 
         # 2. אזהרה
-        click.secho(f"WARNING: You are about to DELETE {len(buckets)} BUCKETS!", fg="yellow", bold=True)
-        click.secho(f"Targets: {', '.join(buckets)}", fg="yellow", bold=True)
+        click.secho(f"WARNING: You are about to DELETE {len(buckets)} BUCKETS!", fg="yellow")
+        click.secho(f"Targets: {', '.join(buckets)}", fg="yellow")
 
         if not click.confirm(click.style("Are you ABSOLUTELY SURE?")):
             click.secho("Operation cancelled.", fg="yellow")
@@ -335,7 +335,6 @@ def delete_s3(name, all):
 
                 success, msg = manager.delete_bucket(bucket, force=True)
                 results.append((bucket, success, msg))
-
 
         click.secho("--- Deletion Summary ---", fg="cyan", bold=True)
 
@@ -353,7 +352,7 @@ def delete_s3(name, all):
     if not click.confirm(click.style(f"Delete bucket '{name}'?", fg="yellow")):
         return
 
-    with console.status(f"Deleting '{name}'...", spinner="dots"):
+    with console.status(f"Deleting '{name}'...", spinner="line"):
         success, message = manager.delete_bucket(name, force=True)
 
     if success:
@@ -377,11 +376,11 @@ def delete_ec2(name_or_id, all):
             click.secho("No ARC instances found.", fg="red")
             return
 
-        click.secho(f"WARNING: You are about to TERMINATE {len(instances)} SERVERS!", fg="yellow", bold=True)
+        click.secho(f"WARNING: You are about to TERMINATE {len(instances)} SERVERS!", fg="yellow")
         names = [i['name'] for i in instances]
         click.secho(f"Targets: {', '.join(names)}", fg="yellow")
 
-        if not click.confirm(click.style("Are you ABSOLUTELY SURE?", fg="yellow")):
+        if not click.confirm(click.style("Are you ABSOLUTELY SURE?")):
             click.secho("Operation cancelled.", fg="red")
             return
 
@@ -399,9 +398,9 @@ def delete_ec2(name_or_id, all):
         click.secho("--- Termination Summary ---", fg="cyan", bold=True)
         for name, success, msg in results:
             if success:
-                click.secho(f"✅ {name}: Terminated successfully", fg="green")
+                click.secho(f"{name}: Terminated successfully", fg="green")
             else:
-                click.secho(f"❌ {name}: {msg}", fg="red")
+                click.secho(f"{name}: {msg}", fg="red")
         return
 
     if not name_or_id:
@@ -488,14 +487,14 @@ def delete_record(zone_name):
     ip = click.prompt(" The existing IP value (must match)")
 
     if click.confirm(f"Delete {name}.{zone_name} -> {ip}?"):
-        with console.status("[red]Deleting record...", spinner="line"):
+        with console.status("Deleting record...", spinner="line"):
             manager = AWSClient()
             success, msg = manager.manage_dns_record(zone_name, 'DELETE', name, ip)
 
         if success:
-            console.print(f"[bold green]✅ {msg}")
+            console.print(f"[bold green] {msg}")
         else:
-            console.print(f"[bold red]❌ {msg}")
+            console.print(f"[bold red] {msg}")
 
 
 @arc.group(name="stop")
@@ -508,7 +507,7 @@ def stop_group():
 @click.argument('name')
 def stop_ec2(name):
     """Stop a running ARC instance"""
-    with console.status("Deleting record...", spinner="line"):
+    with console.status(f"Stopping instance '{name}'...", spinner="line"):
         manager = AWSClient()
         success, message = manager.manage_instance(name, 'stop')
     click.secho(message, fg='green' if success else 'red')
