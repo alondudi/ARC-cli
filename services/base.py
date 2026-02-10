@@ -30,7 +30,7 @@ class BaseService:
             print(f"Connection Error: {e}")
 
     def _load_config(self):
-        """טעינת הגדרות מקובץ"""
+        """Loading configuration from keys file"""
         if self.CONFIG_PATH.exists():
             try:
                 return json.loads(self.CONFIG_PATH.read_text())
@@ -39,7 +39,7 @@ class BaseService:
         return {}
 
     def save_config(self, access_key, secret_key, region):
-        """שמירת הגדרות לקובץ"""
+        """Save configuration to keys file"""
         data = {
             "access_key": access_key,
             "secret_key": secret_key,
@@ -53,7 +53,7 @@ class BaseService:
         )
 
     def validate_connection(self):
-        """בדיקת חיבור מול AWS"""
+        """Connection check AWS"""
         try:
             identity = self.sts.get_caller_identity()
             return True, identity.get('Arn')

@@ -1,10 +1,9 @@
 # services/__init__.py
 from .ec2 import EC2Service
 from .s3 import S3Service
-from .route53 import Route53Service  # <-- השינוי: ייבוא מהקובץ החדש
+from .route53 import Route53Service
 
 
-# AWSClient יורש מכולם, כולל Route53Service החדש
 class AWSClient(EC2Service, S3Service, Route53Service):
     def __init__(self):
         # אתחול כל ההורים
