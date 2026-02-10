@@ -51,6 +51,7 @@ class BaseService:
             aws_secret_access_key=secret_key,
             region_name=region
         )
+        self.sts = self.session.client('sts')
 
     def validate_connection(self):
         """Connection check AWS"""
